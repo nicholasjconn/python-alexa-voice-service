@@ -1,50 +1,51 @@
 
 import helper
 import authorization
+from communication import AlexaConnection
+import communication as alexa_communication
 
 import threading
 import time
-import json
-import requests
-from hyper import HTTP20Connection
-import pyglet
-import os
+import pyaudio
+import wave
+import subprocess
+import speech_recognition
 
-pyglet.resource.path = [os.path.dirname(os.path.realpath(__file__))]
-pyglet.resource.reindex()
 
-#TODO put this and all other communication helper functions in an object
-#TODO This will prevent an overrun of global variables
+def send_audio_get_response(alexa, raw_audio):
+    # Set required payload
+    payload = {
+        "profile": "CLOSE_TALK",
+        "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
+    }
+    # Send the event to alexa
+    # TODO make unique_id and dialog_id unique for each request
+    stream_id = alexa.send_event('SpeechRecognizer', 'Recognize', 'unique_id2', 'dialog_1',
+                                 payload=payload, audio=raw_audio)
+    # Get the response
+    response = alexa.get_response(stream_id)
+    # If not desired response status, throw error
+    if response.status != 200:
+        print(response.read())
+        raise NameError("Bad status (%s)" % response.status)
 
-config = {}
-latest_token = None
-latest_token_time = None
+    # Take the response, and parse it
+    message = alexa_communication.parse_response(response)
+    # Don't close channel until done parsing response
+    response.close()
 
-def get_current_token():
-    global latest_token, latest_token_time
-    # Get current time
-    current_time = time.mktime(time.gmtime())
-    # If there is no latest token, or the latest token is more than 3570 seconds old
-    if (latest_token is None) or (current_time - latest_token_time) > 3570:
-        payload = {
-            "client_id": config['Client_ID'],
-            "client_secret": config['Client_Secret'],
-            "refresh_token": config['refresh_token'],
-            "grant_type": "refresh_token",
-        }
-        url = "https://api.amazon.com/auth/o2/token"
-        r = requests.post(url, data=payload)
-        resp = json.loads(r.text)
-        token = resp['access_token']
-        # Set new latest token and latest token time
-        latest_token = token
-        latest_token_time = current_time
-    # Otherwise, just use latest token
-    else:
-        token = latest_token
-    return token
+    # Get audio response from the message attachment
+    audio_response = message['attachment']
+    # TODO next step is to process each message, not assume what it is
+    # print(message['content'])
+    # print(len(audio_response))
+
+    return audio_response[0]
+
 
 def get_context():
+    # Get context for the device (basically a status)
+    # TODO eventually make this dynamic and actually reflect the device's state
     context_audio = {
         "header": {
             "namespace": "AudioPlayer",
@@ -58,7 +59,7 @@ def get_context():
     }
     context_speaker = {
         "header": {
-        "namespace": "Speaker",
+            "namespace": "Speaker",
             "name": "VolumeState"
         },
         "payload": {
@@ -69,113 +70,114 @@ def get_context():
     return [context_audio, context_speaker]
 
 
-def connection_thread(stop_event):
-    # Setup connection variables
-    url = 'avs-alexa-na.amazon.com'
-
+def device_thread(stop_event, config):
     # Start connection
-    with HTTP20Connection(url, port=443, secure=True, force_proto="h2") as connection:
-        # Get directives
-        stream_id = send_request(connection, 'GET', '/directives')
-        data = connection.get_response(stream_id)
-        print(data.status)
-        if data.status != 200:
-            print(data.read())
-            raise NameError("Bad status (%s)" % data.status)
-        data.close()
+    alexa = AlexaConnection(config, context_handle=get_context)
 
-        # Send sync state message
-        stream_id = send_event(connection, "System", "SynchronizeState", "unique_id")
-        data = connection.get_response(stream_id)
-        if data.status != 204:
-            print(data.read())
-            raise NameError("Bad status (%s)" % data.status)
-        data.close()
+    # Start user_input_Thread
+    threading.Thread(target=user_input_thread, args=(stop_event, alexa)).start()
 
-        with open('example_get_time.pcm', 'rb') as f:
-            raw_audio = f.read()
-        payload = {
-            "profile": "CLOSE_TALK",
-            "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
-        }
-        stream_id = send_event(connection, 'SpeechRecognizer', 'Recognize', 'unique_id2', 'dialog_1',
-                               payload=payload,audio=raw_audio)
-        data = connection.get_response(stream_id)
-        response = data.read()
-        voice = response.split(b'\r\n')[-3]
-        with open("response.mp3", 'wb') as f:
-            f.write(voice)
-        player = pyglet.resource.media('response.mp3')
-        player.play()
-        time.sleep(5)
+    # Connection loop
+    while not stop_event.is_set():
+        # Do any device related things here
+        time.sleep(0.1)
+        pass
 
-        # # Connection loop
-        # while not stop_event.isSet():
-        #     # If timeout is getting close
-        #         # Send ping
-        #         # If failed ping, close connection (and restart below)
-        #     # If there is anything in the queue, send it
-        #     # If there is anything to be read from the server, read it
-        #     pass
-
+    # When complete (stop event is same as user_input_thread
+    # Close the alexa connection and set stop event
+    alexa.close()
+    stop_event.set()
     print("Closing Thread")
+    # TODO
     # If anything went wrong, and stop event is not set
-        # Start new thread automatically
-
-def send_request(connection, method, path, body=None, boundary='this-is-my-boundary'):
-    headers = {
-        'authorization': 'Bearer %s' % get_current_token(),
-        'content-type': 'multipart/form-data; boundary=%s' % boundary
-    }
-    path = '/v20160207' + path
-    if body is not None:
-        stream_id = connection.request(method, path, headers=headers, body=body)
-    else:
-        stream_id = connection.request(method, path, headers=headers)
-
-    return stream_id
+    # Start new thread automatically
 
 
-def send_event(connection, namespace, name, message_id, dialog_request_id="", payload={}, audio=None):
-    body_dict = {
-        "context": get_context(),
-        "event": {
-            "header": {
-                "namespace": namespace,
-                "name": name,
-                "messageId": message_id,
-                "dialogRequestId": dialog_request_id
-            },
-            "payload": payload
-        }
-    }
+def user_input_thread(stop_event, alexa):
+    # While the stop event is not set
+    while not stop_event.is_set():
+        # Prompt user to press enter to start a recording, or q to quit
+        text = input("Press enter anytime to start recording (or 'q' to quit).")
+        # If 'q' is pressed
+        if text == 'q':
+            # Set stop event and break out of loop
+            stop_event.set()
+            break
 
-    boundary='$this-is-my-boundary$'
-
-    start_json = """--%s
-Content-Disposition: form-data; name="metadata"
-Content-Type: application/json; charset=UTF-8\n\n""" % boundary
-
-    start_audio = """--%s
-Content-Disposition: form-data; name="audio"
-Content-Type: application/octet-stream\n\n""" % boundary
-
-    # Create body string, and add json data
-    body_string = (start_json + json.dumps(body_dict) + "--" + boundary).encode()
-    # If raw audio exists, add that as well to the body strring
-    if audio is not None:
-        body_string += ("\n" + start_audio).encode() + audio
-    # Add final boundary
-    body_string += ("--" + boundary + "--").encode()
-
-    return send_request(connection, 'GET', '/events', body=body_string, boundary=boundary)
+        # If enter was pressed (and q was not)
+        # Get raw audio from the microphone
+        raw_audio = get_audio()
+        # Set audio, and get mp3 response
+        mp3_response = send_audio_get_response(alexa, raw_audio)
+        # Play the mp3 file
+        play_mp3(mp3_response)
 
 
-def start_connection_thread():
-    connection_stop_event = threading.Event()
-    thread = threading.Thread(target=connection_thread, args=(connection_stop_event,))
+def start_device_thread(config):
+    # Create event used to stop device thread
+    device_stop_event = threading.Event()
+    # Create and tart the simple device thread
+    thread = threading.Thread(target=device_thread, args=(device_stop_event,config))
     thread.start()
-    return connection_stop_event
+    # Return the thread and the stop event
+    return device_stop_event, thread
+
+
+def get_audio():
+    # Create a speech recognizer
+    r = speech_recognition.Recognizer()
+    # Open the microphone (and release is when done using "with")
+    with speech_recognition.Microphone() as source:
+        # Prompt user to say something
+        print("You can start talking now...")
+        # Record audio until the user stops talking
+        audio = r.listen(source)
+    # Convert audio to raw_data (PCM)
+    raw_audio = audio.get_raw_data()
+
+    # Rather than recording, read a pre-recorded example (for testing)
+    # with open('example_get_time.pcm', 'rb') as f:
+    #     raw_audio = f.read()
+    return raw_audio
+
+
+def play_mp3(response):
+    # Save MP3 data to a file
+    with open("response.mp3", 'wb') as f:
+        f.write(response)
+
+    # Convert mp3 response to wave (pyaudio doesn't work with MP3 files)
+    subprocess.call(['ffmpeg/bin/ffmpeg', '-y', '-i', 'response.mp3', 'response.wav'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+    # Play a wave file directly
+    play_wav('response.wav')
+
+
+def play_wav(file):
+    # Open wave wave
+    wf = wave.open(file, 'rb')
+    # Create pyaudio stream
+    stream = pyaudio_instance.open(
+                format=pyaudio_instance.get_format_from_width(wf.getsampwidth()),
+                channels=wf.getnchannels(),
+                rate=wf.getframerate(),
+                output=True)
+
+    # Set chunk size for playback
+    chunk = 1024
+
+    # Read first chunk of data
+    data = wf.readframes(chunk)
+    # Continue until there is no data left
+    while len(data) > 0:
+        stream.write(data)
+        data = wf.readframes(chunk)
+
+    # When done, stop stream and close
+    stream.stop_stream()
+    stream.close()
+
 
 if __name__ == "__main__":
     # Load configuration file
@@ -185,10 +187,17 @@ if __name__ == "__main__":
         print("Please go to http://localhost:5000")
         authorization.get_authorization()
         config = helper.read_dict('config.dict')
-    authorization = config['refresh_token']
+    # config contains the authorization for the user and device information
 
-    print("DONE!")
+    # Initialize pyaudio
+    pyaudio_instance = pyaudio.PyAudio()
 
-    start_connection_thread()
+    # Start device thread
+    device_stop_event, thread = start_device_thread(config)
+    # Wait until thread finishes before continuing
+    thread.join()
 
-    pass
+    # Terminate the pyaudio instance
+    pyaudio_instance.terminate()
+
+    print("Done")

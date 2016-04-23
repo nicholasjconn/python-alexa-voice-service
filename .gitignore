@@ -1,4 +1,6 @@
 response.mp3
+response.wav
 .idea/*
 __pycache__/*
 config.dict
+ffmpeg
