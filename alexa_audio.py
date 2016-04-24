@@ -14,15 +14,22 @@ class AlexaAudio:
         # Terminate the pyaudio instance
         self.pyaudio_instance.terminate()
 
-    def get_audio(self):
+    def get_audio(self, timeout=None):
         # Create a speech recognizer
         r = speech_recognition.Recognizer()
         # Open the microphone (and release is when done using "with")
         with speech_recognition.Microphone() as source:
-            # Prompt user to say something
-            print("You can start talking now...")
-            # Record audio until the user stops talking
-            audio = r.listen(source)
+            if timeout is None:
+                # Prompt user to say something
+                print("You can start talking now...")
+                # Record audio until the user stops talking
+                audio = r.listen(source)
+            else:
+                print("Start talking now, you have %d seconds" % timeout)
+                try:
+                    audio = r.listen(source, timeout=timeout)
+                except speech_recognition.WaitTimeoutError:
+                    return None
         # Convert audio to raw_data (PCM)
         raw_audio = audio.get_raw_data()
 

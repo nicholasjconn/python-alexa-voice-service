@@ -21,9 +21,10 @@ def parse_response(response):
     message_parts = [p for p in message_parts
                      if p != b'--' and p != b'--\r\n' and len(p) != 0]
 
-    # Currently assuming only 0-2 messages per response
-    if len(message_parts) > 2:
-        raise NameError("Too many messages (%d)!" % len(message_parts))
+    # # Currently assuming only 0-2 messages per response
+    # if len(message_parts) > 2:
+    #     print(message_parts)
+    #     raise NameError("Too many messages (%d)!" % len(message_parts))
 
     message = dict()
     message['content'] = []
@@ -73,6 +74,7 @@ class AlexaConnection:
         # Seconds since epoch time when connection was created (used for message ID)
         self.start_time = calendar.timegm(time.gmtime())
         self.message_counter = 0
+        self.dialog_counter = 0
 
         self.init_connection()
 
@@ -143,6 +145,12 @@ class AlexaConnection:
         self.message_counter += 1
         return message_id
 
+    def get_unique_dialog_id(self):
+        message_id = "njc_dialog_id-%d-%d" % (
+            self.start_time, self.dialog_counter)
+        self.dialog_counter += 1
+        return message_id
+
     def get_current_token(self):
         # Get current time
         current_time = time.mktime(time.gmtime())
@@ -183,9 +191,7 @@ class AlexaConnection:
 
         return stream_id
 
-    def send_event(self, header, payload=None, audio=None):
-        if payload is None:
-            payload = {}
+    def send_event(self, header, payload={}, audio=None):
         # Add message ID to header
         header['messageId'] = self.get_unique_message_id()
         body_dict = {
@@ -225,28 +231,29 @@ class AlexaConnection:
         }
         payload = {'token': token}
         stream_id = self.send_event(header, payload=payload)
-
-        data = self.get_response(stream_id)
-        if data.status != 204:
-            print(data.read())
-            raise NameError("Bad status (%s)" % data.status)
-        data.close()
+        return stream_id
 
     def send_event_speech_finished(self, token):
         header = {
             'namespace': "SpeechSynthesizer",
-            'name': "SpesechFinished"
+            'name': "SpeechFinished"
         }
         payload = {'token': token}
         stream_id = self.send_event(header, payload=payload)
+        return stream_id
 
-        data = self.get_response(stream_id)
-        if data.status != 204:
-            print(data.read())
-            raise NameError("Bad status (%s)" % data.status)
-        data.close()
+    def send_event_expect_speech_timed_out(self):
+        header = {
+            'namespace': 'SpeechRecognizer',
+            'name': 'ExpectSpeechTimedOut'
+        }
+        stream_id = self.send_event(header)
+        return stream_id
 
-    def send_audio_get_response(self, raw_audio):
+    def start_recognize_event(self, raw_audio, dialog_request_id=None):
+        if dialog_request_id is None:
+            dialog_request_id = self.get_unique_dialog_id()
+
         # Set required payload
         payload = {
             "profile": "CLOSE_TALK",
@@ -257,25 +264,20 @@ class AlexaConnection:
         header = {
             'namespace': 'SpeechRecognizer',
             'name': 'Recognize',
-            'dialogRequestId': 'dialog_1'
+            'dialogRequestId': dialog_request_id
         }
         stream_id = self.send_event(header, payload=payload, audio=raw_audio)
-        # Get the response
-        response = self.get_response(stream_id)
-        # If not desired response status, throw error
-        if response.status != 200:
-            print(response.read())
-            raise NameError("Bad status (%s)" % response.status)
+        # Return
+        return stream_id
 
-        # Take the response, and parse it
-        message = parse_response(response)
-        # Don't close channel until done parsing response
-        response.close()
+        # # TODO Don't close channel until done with event
+        # # Don't close channel until done parsing response
+        # response.close()
+        #
+        # # Get audio response from the message attachment
+        # audio_response = message['attachment']
+        # # TODO next step is to process each message, not assume what it is
+        # print(message['content'])
+        # # print(len(audio_response))
 
-        # Get audio response from the message attachment
-        audio_response = message['attachment']
-        # TODO next step is to process each message, not assume what it is
-        print(message['content'])
-        # print(len(audio_response))
-
-        return audio_response[0]
+        # return audio_response[0]
