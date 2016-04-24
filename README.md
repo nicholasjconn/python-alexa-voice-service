@@ -23,7 +23,7 @@ python main.py
 This code has only been tested on Windows. This project will eventually support Linux and hopefully OS X. The final goal is for this project to work out of the box on a Raspberry Pi.
 
 ## License
-MIT - [See LICENSE](../license.txt)
+MIT - [See LICENSE](./license.txt)
 
 ## Future Work
 Please feel free to add functionality or fix any bugs that you find. I will be working on this project whenever I have time, so stay tuned for updates.
