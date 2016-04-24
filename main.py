@@ -1,46 +1,53 @@
 
 import helper
 import authorization
-from communication import AlexaConnection
-import communication as alexa_communication
+import alexa_communication
+import alexa_audio
 
 import threading
 import time
-import pyaudio
-import wave
-import subprocess
-import speech_recognition
 
 
-def send_audio_get_response(alexa, raw_audio):
-    # Set required payload
-    payload = {
-        "profile": "CLOSE_TALK",
-        "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
-    }
-    # Send the event to alexa
-    # TODO make unique_id and dialog_id unique for each request
-    stream_id = alexa.send_event('SpeechRecognizer', 'Recognize', 'unique_id2', 'dialog_1',
-                                 payload=payload, audio=raw_audio)
-    # Get the response
-    response = alexa.get_response(stream_id)
-    # If not desired response status, throw error
-    if response.status != 200:
-        print(response.read())
-        raise NameError("Bad status (%s)" % response.status)
 
+def process_resposne(response):
     # Take the response, and parse it
     message = alexa_communication.parse_response(response)
-    # Don't close channel until done parsing response
-    response.close()
 
-    # Get audio response from the message attachment
-    audio_response = message['attachment']
-    # TODO next step is to process each message, not assume what it is
-    # print(message['content'])
-    # print(len(audio_response))
+    if 'content' not in message:
+        raise KeyError("Content is not available.")
 
-    return audio_response[0]
+    header = message['content']['directive']['header']
+    payload = message['content']['directive']['payload']
+
+    namespace = payload['namespace']
+    if namespace == 'SpeechSynthesizer':
+        directive_speech_synthesizer(message)
+    # elif namespace == 'SpeechRecognizer':
+    #     pass
+    else:
+        raise NameError("Namespace not recognized (%s)." % namespace)
+
+
+def directive_speech_synthesizer(message):
+    header = message['content']['directive']['header']
+    payload = message['content']['directive']['payload']
+
+    name = header['name']
+
+    if name == 'Speak':
+        # TODO keep track of dialogRequestId and messageId
+
+        # Get token for current TTS object
+        token = payload['token']
+
+        # Set SpeechSynthesizer context state to "playing"
+        # Send SpeechStarted Event (with token)
+        # Play audio
+        # Send SpeechFinished Event (with token)
+        # Set SpeechSynthesizer context state to "finished"
+        pass
+    else:
+        raise NameError("Name not recognized (%s)." % name)
 
 
 def get_context():
@@ -70,113 +77,63 @@ def get_context():
     return [context_audio, context_speaker]
 
 
-def device_thread(stop_event, config):
-    # Start connection
-    alexa = AlexaConnection(config, context_handle=get_context)
+class AlexaDevice:
+    def __init__(self, config):
+        self.alexa_audio_instance = alexa_audio.AlexaAudio()
+        self.config = config
+        self.alexa = None
 
-    # Start user_input_Thread
-    threading.Thread(target=user_input_thread, args=(stop_event, alexa)).start()
+        self.device_stop_event = threading.Event()
+        self.device_thread = threading.Thread(target=self.device_thread_function)
+        self.device_thread.start()
 
-    # Connection loop
-    while not stop_event.is_set():
-        # Do any device related things here
-        time.sleep(0.1)
-        pass
+    def device_thread_function(self):
+        # Start connection
+        self.alexa = alexa_communication.AlexaConnection(config, context_handle=get_context)
 
-    # When complete (stop event is same as user_input_thread
-    # Close the alexa connection and set stop event
-    alexa.close()
-    stop_event.set()
-    print("Closing Thread")
-    # TODO
-    # If anything went wrong, and stop event is not set
-    # Start new thread automatically
+        # Start user_input_Thread
+        threading.Thread(target=self.user_input_thread).start()
 
+        # Connection loop
+        while not self.device_stop_event.is_set():
+            # Do any device related things here
+            time.sleep(0.1)
+            pass
 
-def user_input_thread(stop_event, alexa):
-    # While the stop event is not set
-    while not stop_event.is_set():
-        # Prompt user to press enter to start a recording, or q to quit
-        text = input("Press enter anytime to start recording (or 'q' to quit).")
-        # If 'q' is pressed
-        if text == 'q':
-            # Set stop event and break out of loop
-            stop_event.set()
-            break
+        # When complete (stop event is same as user_input_thread
+        # Close the alexa connection and set stop event
+        self.alexa.close()
+        self.device_stop_event.set()
+        print("Closing Thread")
+        # TODO
+        # If anything went wrong, and stop event is not set
+        # Start new thread automatically
 
-        # If enter was pressed (and q was not)
-        # Get raw audio from the microphone
-        raw_audio = get_audio()
-        # Set audio, and get mp3 response
-        mp3_response = send_audio_get_response(alexa, raw_audio)
-        # Play the mp3 file
-        play_mp3(mp3_response)
+    def user_input_thread(self):
+        # While the stop event is not set
+        while not self.device_stop_event.is_set():
+            # Prompt user to press enter to start a recording, or q to quit
+            text = input("Press enter anytime to start recording (or 'q' to quit).")
+            # If 'q' is pressed
+            if text == 'q':
+                # Set stop event and break out of loop
+                self.device_stop_event.set()
+                break
 
+            # If enter was pressed (and q was not)
+            # Get raw audio from the microphone
+            raw_audio = self.alexa_audio_instance.get_audio()
+            # Set audio, and get mp3 response
+            # TODO events and directives related to this should all happen in the same stream
+            mp3_response = self.alexa.send_audio_get_response(raw_audio)
+            # Play the mp3 file
+            self.alexa_audio_instance.play_mp3(mp3_response)
 
-def start_device_thread(config):
-    # Create event used to stop device thread
-    device_stop_event = threading.Event()
-    # Create and tart the simple device thread
-    thread = threading.Thread(target=device_thread, args=(device_stop_event,config))
-    thread.start()
-    # Return the thread and the stop event
-    return device_stop_event, thread
+    def close(self):
+        self.alexa_audio_instance.close()
 
-
-def get_audio():
-    # Create a speech recognizer
-    r = speech_recognition.Recognizer()
-    # Open the microphone (and release is when done using "with")
-    with speech_recognition.Microphone() as source:
-        # Prompt user to say something
-        print("You can start talking now...")
-        # Record audio until the user stops talking
-        audio = r.listen(source)
-    # Convert audio to raw_data (PCM)
-    raw_audio = audio.get_raw_data()
-
-    # Rather than recording, read a pre-recorded example (for testing)
-    # with open('example_get_time.pcm', 'rb') as f:
-    #     raw_audio = f.read()
-    return raw_audio
-
-
-def play_mp3(response):
-    # Save MP3 data to a file
-    with open("response.mp3", 'wb') as f:
-        f.write(response)
-
-    # Convert mp3 response to wave (pyaudio doesn't work with MP3 files)
-    subprocess.call(['ffmpeg/bin/ffmpeg', '-y', '-i', 'response.mp3', 'response.wav'],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-
-    # Play a wave file directly
-    play_wav('response.wav')
-
-
-def play_wav(file):
-    # Open wave wave
-    wf = wave.open(file, 'rb')
-    # Create pyaudio stream
-    stream = pyaudio_instance.open(
-                format=pyaudio_instance.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True)
-
-    # Set chunk size for playback
-    chunk = 1024
-
-    # Read first chunk of data
-    data = wf.readframes(chunk)
-    # Continue until there is no data left
-    while len(data) > 0:
-        stream.write(data)
-        data = wf.readframes(chunk)
-
-    # When done, stop stream and close
-    stream.stop_stream()
-    stream.close()
+    def wait_until_close(self):
+        self.device_thread.join()
 
 
 if __name__ == "__main__":
@@ -189,15 +146,11 @@ if __name__ == "__main__":
         config = helper.read_dict('config.dict')
     # config contains the authorization for the user and device information
 
-    # Initialize pyaudio
-    pyaudio_instance = pyaudio.PyAudio()
-
-    # Start device thread
-    device_stop_event, thread = start_device_thread(config)
-    # Wait until thread finishes before continuing
-    thread.join()
-
-    # Terminate the pyaudio instance
-    pyaudio_instance.terminate()
+    # Create alexa device
+    alexa_device = AlexaDevice(config)
+    # Wait until device is done before continuing
+    alexa_device.wait_until_close()
+    # Once done, close
+    alexa_device.close()
 
     print("Done")

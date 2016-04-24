@@ -1,5 +1,6 @@
 
 import time
+import calendar
 import json
 import requests
 import threading
@@ -69,6 +70,10 @@ class AlexaConnection:
         self.lock = threading.Lock()
         self.ping_stop_event = threading.Event()
 
+        # Seconds since epoch time when connection was created (used for message ID)
+        self.start_time = calendar.timegm(time.gmtime())
+        self.message_counter = 0
+
         self.init_connection()
 
     def init_connection(self):
@@ -81,10 +86,12 @@ class AlexaConnection:
         if data.status != 200:
             print(data.read())
             raise NameError("Bad status (%s)" % data.status)
+        # TODO keep this stream half-open, it is the downchannel stream
         data.close()
 
         # Send sync state message
-        stream_id = self.send_event("System", "SynchronizeState", "unique_id")
+        header = {'namespace': "System", 'name': "SynchronizeState"}
+        stream_id = self.send_event(header)
         data = self.get_response(stream_id)
         if data.status != 204:
             print(data.read())
@@ -98,8 +105,15 @@ class AlexaConnection:
     def ping_thread(self):
         # Run and wait until ping thread is stopped
         while not self.ping_stop_event.is_set():
-            stream_id = self.send_request('GET', '/ping', path_version=False)
-            data = self.get_response(stream_id)
+            try:
+                stream_id = self.send_request('GET', '/ping', path_version=False)
+                data = self.get_response(stream_id)
+            except:
+                self.lock.acquire()
+                self.connection.close()
+                self.lock.release()
+                # Reinitialize the connection
+                self.init_connection()
             # If ping failed
             if data.status != 204:
                 print(data.read())
@@ -122,6 +136,12 @@ class AlexaConnection:
         self.lock.acquire()
         self.connection.close()
         self.lock.release()
+
+    def get_unique_message_id(self):
+        message_id = "njc_message_id-%d-%d" % (
+            self.start_time, self.message_counter)
+        self.message_counter += 1
+        return message_id
 
     def get_current_token(self):
         # Get current time
@@ -163,18 +183,15 @@ class AlexaConnection:
 
         return stream_id
 
-    def send_event(self, namespace, name, message_id, dialog_request_id="", payload=None, audio=None):
+    def send_event(self, header, payload=None, audio=None):
         if payload is None:
             payload = {}
+        # Add message ID to header
+        header['messageId'] = self.get_unique_message_id()
         body_dict = {
             "context": self.context_handle(),
             "event": {
-                "header": {
-                    "namespace": namespace,
-                    "name": name,
-                    "messageId": message_id,
-                    "dialogRequestId": dialog_request_id
-                },
+                "header": header,
                 "payload": payload
             }
         }
@@ -200,3 +217,65 @@ class AlexaConnection:
         result = self.connection.get_response(stream_id)
         self.lock.release()
         return result
+
+    def send_event_speech_started(self, token):
+        header = {
+            'namespace': "SpeechSynthesizer",
+            'name': "SpeechStarted"
+        }
+        payload = {'token': token}
+        stream_id = self.send_event(header, payload=payload)
+
+        data = self.get_response(stream_id)
+        if data.status != 204:
+            print(data.read())
+            raise NameError("Bad status (%s)" % data.status)
+        data.close()
+
+    def send_event_speech_finished(self, token):
+        header = {
+            'namespace': "SpeechSynthesizer",
+            'name': "SpesechFinished"
+        }
+        payload = {'token': token}
+        stream_id = self.send_event(header, payload=payload)
+
+        data = self.get_response(stream_id)
+        if data.status != 204:
+            print(data.read())
+            raise NameError("Bad status (%s)" % data.status)
+        data.close()
+
+    def send_audio_get_response(self, raw_audio):
+        # Set required payload
+        payload = {
+            "profile": "CLOSE_TALK",
+            "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
+        }
+        # Send the event to alexa
+        # TODO dialog_id unique for each request
+        header = {
+            'namespace': 'SpeechRecognizer',
+            'name': 'Recognize',
+            'dialogRequestId': 'dialog_1'
+        }
+        stream_id = self.send_event(header, payload=payload, audio=raw_audio)
+        # Get the response
+        response = self.get_response(stream_id)
+        # If not desired response status, throw error
+        if response.status != 200:
+            print(response.read())
+            raise NameError("Bad status (%s)" % response.status)
+
+        # Take the response, and parse it
+        message = parse_response(response)
+        # Don't close channel until done parsing response
+        response.close()
+
+        # Get audio response from the message attachment
+        audio_response = message['attachment']
+        # TODO next step is to process each message, not assume what it is
+        print(message['content'])
+        # print(len(audio_response))
+
+        return audio_response[0]
