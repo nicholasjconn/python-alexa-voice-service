@@ -10,14 +10,33 @@ __author__ = "NJC"
 __license__ = "MIT"
 
 
-def parse_response(response):
-    """ This function parses the http/2 response into multiple parts before it
-        is processed. The response is returned directly from the http2.request
-        function. The stream should not be closed until this function call is
-        completed.
+def read_from_downstream(boundary, data):
+    """ This functions reads data from the raw downstream channel, and pulls out messages based on
+        the specified boundary.
 
-    :param response: the hyper.HTTP20Response object
-    :return: message dictionary, which contains 'content' and 'attachment' lists
+    :param boundary: boundary used in message
+    :param data: current data in the  downchannel stream
+    :return: (new_data, data) new_data contains a complete message, data contains any remaining data
+    """
+    # Find the last index that ends with boundary
+    matching_indices = [n for n, chunk in enumerate(data) if chunk.endswith(boundary)]
+    # If there are no matching indices, no new data
+    if not matching_indices:
+        return b'', data
+    # Get last boundary location
+    boundary_index = matching_indices[-1]
+
+    # Get parse-able data and remove from data (not including boundary)
+    new_data = data[:boundary_index+1]
+    data = data[boundary_index+1:]
+    return b''.join(new_data), data
+
+
+def get_boundary_from_response(response):
+    """ Parses the response header and returns the boundary.
+
+    :param response: response containing the header that contains the boundary
+    :return: a binary string of the boundary
     """
     # Read only the first value with key 'content-type' (duplicate keys are allowed)
     content = response.headers.pop('content-type')[0]
@@ -30,21 +49,58 @@ def parse_response(response):
         boundary = content[b_start+9:]
     else:
         boundary = content[b_start+9:b_start+b_end]
+    return boundary
+
+
+def parse_response(response):
+    """ This function parses the http/2 response into multiple parts before it
+        is processed. The response is returned directly from the http2.request
+        function. The stream should not be closed until this function call is
+        completed.
+
+    :param response: the hyper.HTTP20Response object
+    :return: message dictionary, which contains 'content' and 'attachment' lists
+    """
+    boundary = get_boundary_from_response(response)
 
     # Read the data from the response
     data = response.read()
+
+    # Returned the resulting message after parsing data
+    return parse_data(data, boundary)
+
+def split_message(data, boundary):
+    """ Split the message into it separate parts based on the boundary.
+
+    :param data: raw message data
+    :param boundary: boundary used in message
+    :return: message parts, that were separated by boundary
+    """
     # Split the data into message parts using the boundary
-    message_parts = data.split(b'--'+boundary)
+    message_parts = data.split(b'--' + boundary)
     # Remove empty messages (that contain only '--' or '--\r\n'
     message_parts = [p for p in message_parts
-                     if p != b'--' and p != b'--\r\n' and len(p) != 0]
+                     if p != b'--' and p != b'--\r\n' and len(p) != 0 and p != b'\r\n']
+    return message_parts
+
+
+def parse_data(data, boundary):
+    """ The function parses tha actual data that was read form the response. All
+        that is needed in addition to the data, is the boundary specified in the
+        response header.
+
+    :param data:
+    :param boundary:
+    :return: message dictionary, which contains 'content' and 'attachment' lists
+    """
+    # Split up data using the boundary into message parts
+    message_parts = split_message(data, boundary)
 
     # Initialize message dictionary
     message = dict()
     # Set content and attachment keys to empty lists
     message['content'] = []
     message['attachment'] = []
-
     # For each message part
     for part in message_parts:
         # Split based on blank line, this separates header and content
@@ -66,12 +122,14 @@ def parse_response(response):
             content_type = message_header[content_type_start:content_type_start+content_type_end]
 
         # Check the content type, should be json or octet
-        if content_type == b'application/json; charset=UTF-8':
+        if content_type == b'application/json; charset=UTF-8' or content_type == b'application/json':
             # If JSON, add to content
             message['content'].append(json.loads(message_content.decode()))
         elif content_type == b'application/octet-stream':
             # If octet stream, add to attachment
             message['attachment'].append(message_content)
+        else:
+            raise NameError("Content type not recognized (%s)" % content_type.decode())
 
     return message
 
@@ -80,7 +138,7 @@ class AlexaConnection:
     """ This object manages the connection to the alexa voice services. Any communication
         related functions should be added to this object.
     """
-    def __init__(self, config, context_handle, boundary='this-is-my-boundary'):
+    def __init__(self, config, context_handle, process_response_handle, boundary='this-is-my-boundary'):
         """ Initialize the AlexaConnection. Requires configuration values and a context
             function handle. Boundary is an optional argument.
 
@@ -113,7 +171,8 @@ class AlexaConnection:
 
         # Thread related variables
         self.lock = threading.Lock()
-        self.ping_stop_event = threading.Event()
+        self.thread_stop_event = threading.Event()
+        self.process_response_handle = process_response_handle
 
         # Calls the function to initialize the alexa connection
         self.init_connection()
@@ -126,31 +185,66 @@ class AlexaConnection:
 
         """
         # Open connection
-        self.connection = HTTP20Connection(self.url, port=443, secure=True, force_proto="h2")
+        self.connection = HTTP20Connection(self.url, port=443, secure=True, force_proto="h2", enable_push=True)
 
-        # Start by sending a "GET" /directives to open downchannel stream
-        stream_id = self.send_request('GET', '/directives')
-        data = self.get_response(stream_id)
-        if data.status != 200:
-            print(data.read())
-            raise NameError("Bad status (%s)" % data.status)
-        # TODO keep track of this half-open stream, it is the downchannel stream
+        # First start downstream
+        self.start_downstream()
 
         # Send sync state message (required)
         header = {'namespace': "System", 'name': "SynchronizeState"}
         stream_id = self.send_event(header)
-        # TODO handle this response the same way others are handled (using get_and_process_response)
-        # TODO except get_and_process_response is not in this library, potential reorganization required
         # Manually handle this response for now
         data = self.get_response(stream_id)
         # Should be 204 response (no content)
         if data.status != 204:
-            print(data.read())
+            print("PUSH" + data.read())
             raise NameError("Bad status (%s)" % data.status)
 
         # Start ping thread
-        thread = threading.Thread(target=self.ping_thread)
-        thread.start()
+        ping_thread = threading.Thread(target=self.ping_thread)
+        ping_thread.start()
+
+    def start_downstream(self, lock=False):
+        """ Starts the downstream channel thread. Lock should only be True if this function is
+            called from a thread object.
+
+        :param lock: boolean indicating if locking should be used
+        """
+        if lock:
+            self.lock.acquire()
+        # Start by sending a "GET" /directives to open downchannel stream
+        self.downstream_id = self.send_request('GET', '/directives')
+        downstream_response = self.get_response(self.downstream_id)
+        if downstream_response.status != 200:
+            print(downstream_response.read())
+            raise NameError("Bad status (%s)" % downstream_response.status)
+        self.downstream_boundary = get_boundary_from_response(downstream_response)
+        if lock:
+            self.lock.release()
+
+        downstream_thread = threading.Thread(target=self.downstream_thread)
+        downstream_thread.start()
+
+    def downstream_thread(self):
+        """ Downstream channel thread, which continuously monitors the stream for new data. Data
+            is automatically parsed when an entire message is recieved.
+        """
+        actual_stream = self.connection.streams[self.downstream_id]
+
+        # Loop continuously waiting for stop event to be set
+        while not self.thread_stop_event.is_set():
+            # Only do stuff if there is data ready in the stream
+            if len(actual_stream.data) > 1:
+                # self.lock.acquire()
+                # Get data from the downstream
+                new_data, actual_stream.data = read_from_downstream(self.downstream_boundary, actual_stream.data)
+
+                if len(new_data) > 0:
+                    message = parse_data(new_data, self.downstream_boundary)
+                    # TODO somehow message ends up being empty
+                    self.process_response_handle(message)
+            # Check for new data every 0.5 seconds
+            time.sleep(0.5)
 
     def ping_thread(self):
         """ This functions runs as a thread, and will send a ping request every 4 minutes. This ping
@@ -158,7 +252,7 @@ class AlexaConnection:
             connection is reestablished using self.init_connection().
         """
         # Run and wait until ping thread is stopped
-        while not self.ping_stop_event.is_set():
+        while not self.thread_stop_event.is_set():
             # Try to send ping request, and get the response
             try:
                 stream_id = self.send_request('GET', '/ping', path_version=False)
@@ -187,7 +281,7 @@ class AlexaConnection:
             # Captures the current time before sleeping
             start_sleep_time = time.mktime(time.gmtime())
             # Loops every 1 second, to see if correct time has passed (4 minutes) or the stop event is set
-            while not self.ping_stop_event.is_set() \
+            while not self.thread_stop_event.is_set() \
                     and (time.mktime(time.gmtime()) - start_sleep_time) < 4*60:
                 time.sleep(1)
         print("Closing ping thread.")
@@ -195,7 +289,7 @@ class AlexaConnection:
     def close(self):
         """ Closes the connection and stops the ping thread.
         """
-        self.ping_stop_event.set()
+        self.thread_stop_event.set()
         self.lock.acquire()
         self.connection.close()
         self.lock.release()
@@ -295,7 +389,7 @@ class AlexaConnection:
 
         return stream_id
 
-    def send_event(self, header, payload={}, audio=None):
+    def send_event(self, header, payload=None, audio=None):
         """ Send an event allows for a higher level of abstraction compared to send_request. The AVS message header
             (different from the HTTP/2 header) is the only required argument. Payload and audio (attachment) are both
             optional. This is used to easily sent events to the AVS.
@@ -305,6 +399,8 @@ class AlexaConnection:
         :param audio: raw binary string attachment
         :return: stream_id associated with the request
         """
+        if payload is None:
+            payload = {}
         # Add message ID to header
         header['messageId'] = self.get_unique_message_id()
         body_dict = {
@@ -343,6 +439,56 @@ class AlexaConnection:
         result = self.connection.get_response(stream_id)
         self.lock.release()
         return result
+
+    def start_recognize_event(self, raw_audio, dialog_request_id=None):
+        """ Starts a SpeechRecognizer.Recognize event. Requires a raw_audio argument. The optional dialog_request_id
+            can be used to indicate that the recognize event is related to a previous one.The response is not read in
+            this function.
+
+        :param raw_audio: raw binary string audio attachment
+        :param dialog_request_id: (optional) previously used dialog_request_id
+        :return: the stream_id associated with the request
+        """
+        # If dialog_request_id is not specified, generate a new unique one
+        if dialog_request_id is None:
+            dialog_request_id = self.get_unique_dialog_id()
+
+        # Set required payload and header
+        payload = {
+            "profile": "CLOSE_TALK",
+            "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
+        }
+        header = {
+            'namespace': 'SpeechRecognizer',
+            'name': 'Recognize',
+            'dialogRequestId': dialog_request_id
+        }
+        # Send the event to alexa
+        stream_id = self.send_event(header, payload=payload, audio=raw_audio)
+        # Return
+        return stream_id
+
+    def get_and_process_response(self, stream_id):
+        """ For a specified stream_id, get AVS's response and process it. The request must have been sent before calling
+            this function.
+
+        :param stream_id: stream_id used for the request
+        """
+        # Get the response
+        response = self.get_response(stream_id)
+
+        # If no content response, but things are OK, just return
+        if response.status == 204:
+            return
+
+        # If not OK response status, throw error
+        if response.status != 200:
+            print(response.read())
+            raise NameError("Bad status (%s)" % response.status)
+
+        # Take the response, and parse it
+        message = parse_response(response)
+        self.process_response_handle(message)
 
     def send_event_speech_started(self, token):
         """ API specific function that sends the SpeechSynthesizer.SpeechStarted event. The response is not read
@@ -387,30 +533,18 @@ class AlexaConnection:
         stream_id = self.send_event(header)
         return stream_id
 
-    def start_recognize_event(self, raw_audio, dialog_request_id=None):
-        """ Starts a SpeechRecognizer.Recognize event. Requires a raw_audio argument. The optional dialog_request_id
-            can be used to indicate that the recognize event is related to a previous one.The response is not read in
+    def send_event_alert_name(self, name, token):
+        """ API specific function that sends a event within the Alerts namespace. The response is not read in
             this function.
 
-        :param raw_audio: raw binary string audio attachment
-        :param dialog_request_id: (optional) previously used dialog_request_id
+        :param name: name of event within the Alerts namesapce
+        :param token: token for alert
         :return: the stream_id associated with the request
         """
-        # If dialog_request_id is not specified, generate a new unique one
-        if dialog_request_id is None:
-            dialog_request_id = self.get_unique_dialog_id()
-
-        # Set required payload and header
-        payload = {
-            "profile": "CLOSE_TALK",
-            "format": "AUDIO_L16_RATE_16000_CHANNELS_1"
-        }
         header = {
-            'namespace': 'SpeechRecognizer',
-            'name': 'Recognize',
-            'dialogRequestId': dialog_request_id
+            'namespace': 'Alerts',
+            'name': name
         }
-        # Send the event to alexa
-        stream_id = self.send_event(header, payload=payload, audio=raw_audio)
-        # Return
+        payload = {'token': token}
+        stream_id = self.send_event(header, payload=payload)
         return stream_id

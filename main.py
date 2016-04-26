@@ -6,43 +6,147 @@ import alexa_audio
 
 import threading
 import time
+import traceback
 
 __author__ = "NJC"
 __license__ = "MIT"
-__version__ = "0.1"
+__version__ = "0.2"
 
-def get_context():
-    """ Returns the current context of the AlexaDevice.
 
-    See https://developer.amazon.com/public/solutions/alexa/alexa-voice-service/reference/context for more information.
-
-    :return: context dictionary
+class AlarmManager:
+    """ This object manages all alarms and timers sent via the Alerts interface.
     """
-    # TODO Move into the AlexaDevice object
-    # TODO eventually make this dynamic and actually reflect the device's state
-    # Get context for the device (basically a status)
-    context_audio = {
-        "header": {
-            "namespace": "AudioPlayer",
-            "name": "PlaybackState"
-        },
-        "payload": {
-            "token": "audio_token",
-            "offsetInMilliseconds": 0,
-            "playerActivity": "IDLE"
+    def __init__(self, audio):
+        """ Initializes the AlarmManager object. Requires an AlexaAudio object to sound alarms. The
+            AlexaCommunication object must be specified in a separate function call.
+
+        :param audio: AlexaAudio object instance
+        """
+        self.alexa_device = None
+        self.audio = audio
+        self.alerts = {}
+
+    def set_alexa_device(self, alexa_device):
+        """ Set's the current AlexaDevice object.
+
+        :param alexa_device: AlexaDevice object
+        """
+        self.alexa_device = alexa_device
+
+    def set_alert(self, token, alert_type, scheduled_time):
+        """ Called when a new alarm is to be added (from SetAlert directive).
+
+        :param token: token for the alarm
+        :param alert_type: alert type from the API
+        :param scheduled_time: scheduled time (UTC time as ISO string)
+        :return: boolean indicating success or failure
+        """
+        try:
+            s_time = helper.get_timestamp_from_iso(scheduled_time)
+            time_difference = s_time-time.time()
+            print(time_difference)
+            timer_thread = threading.Timer(time_difference, self.start_alert, args=(token,))
+            timer_thread.start()
+            stop_event = threading.Event()
+            self.alerts[token] = {
+                'type': alert_type,
+                'scheduled_time': scheduled_time,
+                'timer_thread': timer_thread,
+                'stop_event': stop_event,
+                'is_active': False
+            }
+            print("Alarm set successfully.")
+        except:
+            print("Error setting alarm")
+            return False
+        return True
+
+    def delete_alert(self, token):
+        """ Called when an alarm is to be deleted (from DeleteAlert directive).
+
+        :param token: token for the alarm
+        :param alert_type: alert type from the API
+        :param scheduled_time: scheduled time (UTC time as ISO string)
+        :return: boolean indicating success or failure
+        """
+        try:
+            self.alerts[token]['timer_thread'].cancel()
+            if self.alerts[token]['is_active']:
+                print("Stopping alarm")
+                self.alerts[token]['stop_event'].set()
+
+                stream_id = self.alexa_device.alexa.send_event_alert_name('AlertStopped', token)
+                # TODO combine get_and_process_reponse with alexa_send_event
+                self.alexa_device.alexa.get_and_process_response(stream_id)
+            del self.alerts[token]
+            print("Alarm deleted")
+            return True
+        except:
+            traceback.print_exc()
+            print("Error deleting alarm")
+            return False
+
+    def get_alarm_context(self):
+        """ Get the alert context dictionary.
+
+        :return: dictionary containing alert context
+        """
+        tokens = self.alerts.keys()
+        all_alerts = []
+        active_alerts = []
+        for token in tokens:
+            alert = {
+                'token': token,
+                'type': self.alerts[token]['type'],
+                'scheduledTime': self.alerts[token]['scheduled_time']
+            }
+            all_alerts.append(alert)
+            if self.alerts[token]['is_active']:
+                active_alerts.append(alert)
+
+        context_alerts = {
+            "header": {
+                "namespace": "Alerts",
+                "name": "AlertsState"
+            },
+            "payload": {
+                "allAlerts": all_alerts,
+                "activeAlerts": active_alerts
+            }
         }
-    }
-    context_speaker = {
-        "header": {
-            "namespace": "Speaker",
-            "name": "VolumeState"
-        },
-        "payload": {
-            "volume": 50,
-            "muted": False
-        }
-    }
-    return [context_audio, context_speaker]
+        return context_alerts
+
+    def start_alert(self, token):
+        """ Called as a thread when the alarm is started.
+
+        :param token: token for active alarm
+        """
+        print("Alarm started!")
+        # This function is called by the scheduler
+        # Be sure to delete the alert dictionary when done
+
+        self.alerts[token]['is_active'] = True
+
+        # Send alert started to alexa
+        stream_id = self.alexa_device.alexa.send_event_alert_name('AlertStarted', token)
+        self.alexa_device.alexa.get_and_process_response(stream_id)
+        # If foreground
+        if True:
+            # Play in foreground for 30 seconds, unless stopped
+            self.audio.play_wav('files/alarm.wav',
+                                timeout=30, stop_event=self.alerts[token]['stop_event'], repeat=True)
+            # Send status to alexa
+            stream_id = self.alexa_device.alexa.send_event_alert_name('AlertEnteredForeground', token)
+            self.alexa_device.alexa.get_and_process_response(stream_id)
+        else:
+            # Play quietly in background (or not at all
+            # Send status to alexa
+            stream_id = self.alexa_device.alexa.send_event_alert_name('AlertEnteredBackground', token)
+            self.alexa_device.alexa.get_and_process_response(stream_id)
+
+        # If alert still exists (would exist if alarm is not cancelled)
+        if token in self.alerts:
+            self.delete_alert(token)
 
 
 class AlexaDevice:
@@ -50,15 +154,16 @@ class AlexaDevice:
         highly abstract yet simple interface for Amazon's Alexa Voice Service (AVS).
 
     """
-    def __init__(self, config):
+    def __init__(self, alexa_config):
         """ Initialize the AlexaDevice using the config dictionary. The config dictionary must containing the
             Client_ID, Client_Secret, and refresh_token.
 
-        :param config: config dictionary specific to the device
+        :param alexa_config: config dictionary specific to the device
         """
         self.alexa_audio_instance = alexa_audio.AlexaAudio()
-        self.config = config
-        # self.alexa = None
+        self.alarm_manager = AlarmManager(self.alexa_audio_instance)
+        self.config = alexa_config
+        self.alexa = None
 
         self.device_stop_event = threading.Event()
         self.device_thread = threading.Thread(target=self.device_thread_function)
@@ -70,8 +175,13 @@ class AlexaDevice:
 
             Eventually this function will incorporate any device specific functionality.
         """
+        # TODO make sure this function can be called again, not during instantiation
+
         # Start connection and save
-        self.alexa = alexa_communication.AlexaConnection(config, context_handle=get_context)
+        self.alexa = alexa_communication.AlexaConnection(config, context_handle=self.get_context,
+                                                         process_response_handle=self.process_response)
+
+        self.alarm_manager.set_alexa_device(self)
 
         # Start user_input_Thread
         threading.Thread(target=self.user_input_thread).start()
@@ -111,31 +221,52 @@ class AlexaDevice:
             if raw_audio is None:
                 continue
 
-            # TODO make it so that this starts a thread, so the response can be interrupted by user if desired
+            # TODO make it so the response can be interrupted by user if desired (maybe start a thread)
             stream_id = self.alexa.start_recognize_event(raw_audio)
+            self.alexa.get_and_process_response(stream_id)
 
-            self.get_and_process_response(stream_id)
+    def get_context(self):
+        """ Returns the current context of the AlexaDevice.
 
-    def get_and_process_response(self, stream_id):
-        """ For a specified stream_id, get AVS's response and process it. The request must have been sent before calling
-            this function.
+        See https://developer.amazon.com/public/solutions/alexa/alexa-voice-service/reference/context for more
+        information.
 
-        :param stream_id: stream_id used for the request
+        :return: context dictionary
         """
-        # Get the response
-        response = self.alexa.get_response(stream_id)
+        # TODO eventually make this dynamic and actually reflect the device's state
+        # Get context for the device (basically a status)
+        context_audio = {
+            "header": {
+                "namespace": "AudioPlayer",
+                "name": "PlaybackState"
+            },
+            "payload": {
+                "token": "audio_token",
+                "offsetInMilliseconds": 0,
+                "playerActivity": "IDLE"
+            }
+        }
+        context_alerts = self.alarm_manager.get_alarm_context()
+        context_speaker = {
+            "header": {
+                "namespace": "Speaker",
+                "name": "VolumeState"
+            },
+            "payload": {
+                "volume": 100,
+                "muted": False
+            }
+        }
+        return [context_audio, context_alerts, context_speaker]
 
-        # If no content response, but things are OK, just return
-        if response.status == 204:
-            return
+    def process_response(self, message):
+        """ Called when a message is received from Alexa (either on the downchannel or as a response). This
+            function will take actions based on the message recieved.
 
-        # If not OK response status, throw error
-        if response.status != 200:
-            print(response.read())
-            raise NameError("Bad status (%s)" % response.status)
-
-        # Take the response, and parse it
-        message = alexa_communication.parse_response(response)
+        :param message: message received from Alexa
+        """
+        # Loop through each message
+        print("%d messages received" % len(message['content']))
 
         # If there is no content in the message, throw error (nothing to parse)
         if 'content' not in message:
@@ -145,8 +276,10 @@ class AlexaDevice:
         if len(message['attachment']) > 1:
             raise IndexError("Too many attachments (%d)" % len(message['attachment']))
 
-        # TODO handle multiple attachments received (not 100% sure multiple attachments can be received)
-        attachment = message['attachment'][0]
+        if message['attachment']:
+            attachment = message['attachment'][0]
+        else:
+            attachment = None
 
         # print("%d messages received" % len(message['content']))
         # Loop through all content received
@@ -159,6 +292,8 @@ class AlexaDevice:
                 self.process_directive_speech_synthesizer(content, attachment)
             elif namespace == 'SpeechRecognizer':
                 self.process_directive_speech_recognizer(content, attachment)
+            elif namespace == 'Alerts':
+                self.process_directive_alerts(content, attachment)
             # Throw an error in case the namespace is not recognized.
             # This indicates new a process directive function needs to be added
             else:
@@ -186,12 +321,12 @@ class AlexaDevice:
             # TODO capture state so that it can be used in context
             # Send SpeechStarted Event (with token)
             stream_id = self.alexa.send_event_speech_started(token)
-            self.get_and_process_response(stream_id)
+            self.alexa.get_and_process_response(stream_id)
             # Play the mp3 file
             self.alexa_audio_instance.play_mp3(audio_response)
             # Send SpeechFinished Event (with token)
             stream_id = self.alexa.send_event_speech_finished(token)
-            self.get_and_process_response(stream_id)
+            self.alexa.get_and_process_response(stream_id)
             # Set SpeechSynthesizer context state to "finished"
             # TODO capture state so that it can be used in context
         # Throw an error if the name is not recognized.
@@ -226,16 +361,53 @@ class AlexaDevice:
                 print("Speech timeout.")
                 # Send an event to let Alexa know that the user did not respond
                 stream_id = self.alexa.send_event_expect_speech_timed_out()
-                self.get_and_process_response(stream_id)
+                self.alexa.get_and_process_response(stream_id)
                 return
 
             # Send audio captured (start_recognize_event) using old dialog_request_id and then process reponse
             stream_id = self.alexa.start_recognize_event(raw_audio, dialog_request_id=dialog_request_id)
-            self.get_and_process_response(stream_id)
+            self.alexa.get_and_process_response(stream_id)
+        elif name == 'StopCapture':
+            # TODO find out what this means, it is not in the API.
+            pass
         # Throw an error if the name is not recognized.
         # This indicates new a case needs to be added
         else:
             raise NameError("Name not recognized (%s)." % name)
+
+    def process_directive_alerts(self, content, attachment):
+        """ Process a directive that belongs to the Alert namespace. Attachment not used, but included
+            to keep the same arguments as other process_directive functions.
+
+        :param content: content dictionary (contains header and payload)
+        :param attachment: attachment included with the content
+        """
+        header = content['directive']['header']
+        payload = content['directive']['payload']
+
+        # Get the name from the header
+        name = header['name']
+        token = payload['token']
+
+        if name == 'SetAlert':
+            is_set = self.alarm_manager.set_alert(
+                token,
+                payload['type'],
+                payload['scheduledTime']
+            )
+            # TODO move event sending to Alert object
+            if is_set:
+                stream_id = self.alexa.send_event_alert_name('SetAlertSucceeded', token)
+            else:
+                stream_id = self.alexa.send_event_alert_name('SetAlertFailed', token)
+            self.alexa.get_and_process_response(stream_id)
+        elif name == 'DeleteAlert':
+            is_deleted = self.alarm_manager.delete_alert(token)
+            if is_deleted:
+                stream_id = self.alexa.send_event_alert_name('DeleteAlertSucceeded', token)
+            else:
+                stream_id = self.alexa.send_event_alert_name('DeleteAlertFailed', token)
+            self.alexa.get_and_process_response(stream_id)
 
     def close(self):
         """ Closes the AlexaDevice. Should be called before the program terminates.

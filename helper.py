@@ -1,5 +1,11 @@
 
 import json
+import calendar
+import datetime
+
+__author__ = "NJC"
+__license__ = "MIT"
+
 
 def write_dict(path, in_dict):
     """ Write a dictionary to a file using JSON. The dictionary must only contain
@@ -22,3 +28,8 @@ def read_dict(path):
     with open(path) as file:
         out_dict = json.load(file)
     return out_dict
+
+
+def get_timestamp_from_iso(iso_string):
+    return calendar.timegm(datetime.datetime.strptime(iso_string, "%Y-%m-%dT%H:%M:%S%z").timetuple())
+

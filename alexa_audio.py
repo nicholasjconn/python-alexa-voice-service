@@ -3,6 +3,7 @@ import pyaudio
 import wave
 import subprocess
 import speech_recognition
+import time
 
 __author__ = "NJC"
 __license__ = "MIT"
@@ -79,7 +80,7 @@ class AlexaAudio:
         # Play a wave file directly
         self.play_wav('response.wav')
 
-    def play_wav(self, file):
+    def play_wav(self, file, timeout=None, stop_event=None, repeat=False):
         """ Play a wave file using PyAudio. The file must be specified as a path.
 
         :param file: path to wave file
@@ -96,12 +97,25 @@ class AlexaAudio:
             # Set chunk size for playback
             chunk = 1024
 
-            # Read first chunk of data
-            data = wf.readframes(chunk)
-            # Continue until there is no data left
-            while len(data) > 0:
-                stream.write(data)
+            # Get start time
+            start_time = time.mktime(time.gmtime())
+
+            end = False
+            while not end:
+                # Read first chunk of data
                 data = wf.readframes(chunk)
+                # Continue until there is no data left
+                while len(data) > 0 and not end:
+                    if timeout is not None and time.mktime(time.gmtime())-start_time > timeout:
+                        end = True
+                    if stop_event is not None and stop_event.is_set():
+                        end = True
+                    stream.write(data)
+                    data = wf.readframes(chunk)
+                if not repeat:
+                    end = True
+                else:
+                    wf.rewind()
 
         # When done, stop stream and close
         stream.stop_stream()
