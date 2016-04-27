@@ -57,7 +57,7 @@ class AlexaAudio:
         raw_audio = audio.get_raw_data()
 
         # Rather than recording, read a pre-recorded example (for testing)
-        # with open('example_get_time.pcm', 'rb') as f:
+        # with open('files/example_get_time.pcm', 'rb') as f:
         #     raw_audio = f.read()
         return raw_audio
 
@@ -70,15 +70,15 @@ class AlexaAudio:
         :param raw_audio: the raw audio as a binary string
         """
         # Save MP3 data to a file
-        with open("response.mp3", 'wb') as f:
+        with open("files/response.mp3", 'wb') as f:
             f.write(raw_audio)
 
         # Convert mp3 response to wave (pyaudio doesn't work with MP3 files)
-        subprocess.call(['ffmpeg/bin/ffmpeg', '-y', '-i', 'response.mp3', 'response.wav'],
+        subprocess.call(['ffmpeg/bin/ffmpeg', '-y', '-i', 'files/response.mp3', 'files/response.wav'],
                         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
         # Play a wave file directly
-        self.play_wav('response.wav')
+        self.play_wav('files/response.wav')
 
     def play_wav(self, file, timeout=None, stop_event=None, repeat=False):
         """ Play a wave file using PyAudio. The file must be specified as a path.

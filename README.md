@@ -21,7 +21,7 @@ git clone https://github.com/nicholasjconn/python-alexa-voice-service
 ``
 
 ``
-cd python-alexa
+cd python-alexa-voice-service
 ``
 
 Extract and copy the ffmpeg folder to the project's folder. Rename to ffmpeg, so that the ffmpeg command is located in python-alexa-voice-service/ffmpeg/bin/ffmpeg.
@@ -47,11 +47,11 @@ When you would like to close the program, press 'q' and then enter.
 Errors and other text may be printed out if anything goes wrong. This is a work in progress.
 
 #### Example Alexa Commands
-* What time is it?
-* Set an alarm.
-* Where am I?
-* What is the weather tomorrow?
-* Are you a robot?
+* "What time is it?"
+* "Set an alarm."
+* "Where am I?"
+* "What is the weather tomorrow?"
+* "Are you a robot?"
 
 If you have the Wink hub or any other supported home automation devices, you can connect them via the [Android Alexa App](https://play.google.com/store/apps/details?id=com.amazon.dee.app&hl=en). Once connected, you can say things like "turn on bedroom lights" or "set bedroom lights to 50%".
 
@@ -85,4 +85,4 @@ Please feel free to add functionality or fix any bugs that you find. I will be w
 Currently, only the SpeechRecognizer and SpeechSynthesizer interfaces are supported. More will be added in the near future.
 
 ## Change Log
-* Version 0.2 - Added Alert (alarm and timer) functionality.
+* Version 0.2 - Added Alert (alarm and timer) functionality, and updated README.md
