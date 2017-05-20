@@ -35,7 +35,7 @@ Rename config_example.dict to config.dict. Then open the file and update the Cli
 Run the main.py script. If you run into any errors, chances are that you have missed one of the requirements.
 
 ``
-python main.py
+python3 main.py
 ``
 
 ## Using the Code
