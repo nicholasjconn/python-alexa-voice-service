@@ -39,7 +39,7 @@ class AlexaAudio:
         # Create a speech recognizer
         r = speech_recognition.Recognizer()
         # Open the microphone (and release is when done using "with")
-        with speech_recognition.Microphone() as source:
+        with speech_recognition.Microphone(sample_rate=16000) as source:
             if timeout is None:
                 # Prompt user to say something
                 print("You can start talking now...")
